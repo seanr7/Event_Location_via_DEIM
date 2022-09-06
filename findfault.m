@@ -1,66 +1,53 @@
-%% By: Sean Reiter, Date: 4-20-2022
-function [plscore, pdeim, pqdeim] = findfault(X, k, t0)
-% Function to locate power system events using the Discrete Empirical
-% Interpolation Method (DEIM),
+%% Function to attempt to locate the source of a power system fault
+% By: Sean Reiter
+% Date Modified: 9-2-2022
+function [p] = findfault(location_fun, V, t0, k, N)
+% Attempts to locate the source of a power system fault purely from data
+% using the DEIM index selection algorithm, leverage scores, or its
+% variants. Uses the optimal rank-k approximation via the SVD.
 % 
-% X == n\times m block matrix of PMU data, n >> m (usually bus voltage
-% magnitude data).
-% k == no. of locations to look at, OR, can input a threshold <1 for 
-% computing approx. rank of data, indicates how much variance to capture in 
-% the chosen singular values.
-% t0 == timestamp at which event occurs 
-%
-% p == distinguished row indices as chosen by selecting the k largest 
-% magnitude r left singular vectors, r is approximate rank of X.
-% pdeim == distinguished indices chosen by standard DEIM selection process.
-% pqdeim == distinguished indices chosen by QDEIM.
-
+% Inputs:
+% 
+% :param location_fun: .m function used to locate the source of power
+%        system faults (DEIM + its variants, leverage scores)
+% :param V: n \times T matrix V containing measurement data (typically bus
+%        voltage magnitude measurements)
+% :param k: no. of locations to look for. Can be an integer or a percentage
+%        of variance to capture in the data.
+% :param t0: timestamp at which the fault occurs
+% :param N: no. of timesteps to include
+% 
+% Outputs:
+% 
+% :param p: ordered list of bus indices
 %% 
-[n,T] = size(X); %no. of buses
-if nargin == 3 
-    for i = 1:n %remove mean of pre-event behavior from each row    
-%         X(i,:) = X(i,:)-mean(X(i,1:t0-2))*ones(1,T);   
-        X(i,:) = X(i,:)-mean(X(i,1:49))*ones(1,T);     
-    end 
-    [U,S,~] = svd(X(:,t0:t0+100),'econ');    sv = diag(S); %include one second of data
-    if k < 1 % k variable is a threshold
-        threshold = k;
-        sum_s = 0;  k=0;
-        while sum_s < threshold*sum(sv) 
-            sum_s = sum_s+sv(k+1);
-            k = k+1;
-        end
+[~, T] = size(V); % dimensions of the data
+% Compute mean of pre-event behaviour in at each bus/ each row of V 
+% (outputs col. vector `means'), and remove this to normalize the data
+means = mean(V(:, 1:t0-1), 2);
+V = V - means*ones(1,T); 
+
+% Compute the economy-sized SVD of V
+% Assumption: V contains 5 seconds of data with a simulation timestep of
+% .01 second. The measurement sampling rate is 34 times/second ~ .0294
+% seconds. So, about 3 simulation timestamps. t0 + 101 is approximately one 
+% second of data.
+% TODO: Make a function that handles different timesteps/step sizes?
+[U, Sigma, ~] = svd(V(:, t0:2:t0 + N), 'econ'); 
+
+if k < 1 % If k is a percentage threshold
+    sum_sv = sum(diag(Sigma)); % Compute sum of all singular values
+    threshold = k;
+    k = 0;  sum_k_sv = 0; % Initialize counters
+    % While the first k singular values < threshold * sum of all svs
+    while sum_k_sv < threshold*sum_sv
+        sum_k_sv = sum_k_sv + Sigma(k+1, k+1);
+        k = k + 1;
     end
-elseif nargin == 2 %if no t0 included, use all data before, during, and after event
-%     for i = 1:n %remove mean behaviour of each row
-%         X(i,:) = X(i,:)-mean(X(i,:))*ones(1,T);           
-%     end 
-    [U,S,~] = svd(X,'econ');    sv = diag(S);  
-    if k < 1 % k variable is a threshold
-        threshold = k;
-        sum_s = 0;  k=0;
-        while sum_s < threshold*sum(sv) 
-            sum_s = sum_s+sv(k+1);
-            k = k+1;
-        end
-    end
-else %if no k or threshold selected
-    for i = 1:n %remove mean behaviour of each row
-        X(i,:) = X(i,:)-mean(X(i,1:49))*ones(1,T);           
-    end 
-    [U,S,~] = svd(X,'econ');    
-    k = 3; %look at five most affected buses by default
 end
 
-Uk = U(:,1:k);   Sk = S(1:k,1:k); %first r singular vectors and singular values
-Uktest = Uk*Sk;
-
-Ukmag = zeros(n,1); 
-for i = 1:n %take 2-norm of rows of Ur
-    Ukmag(i) = norm(Uktest(i,:),2);
-end
-Ukmag = Ukmag/sum(Ukmag); %normalize 
-
-[~,plscore] = sort(Ukmag,'descend');   pdeim = deim(Uktest);   pqdeim = qdeim(Uktest); 
-plscore = plscore(1:k); %get first k indices
+% Else, k is an integer. Pre-determined no. of locations to check for
+U_k = U(:,1:k);   Sigma_k = Sigma(1:k,1:k); % Get leading left singular vectors/values
+% Pass weighted left singular vectors + no. of indices to choose to location_fun arg
+p = location_fun(U_k*Sigma_k, k); 
 end
